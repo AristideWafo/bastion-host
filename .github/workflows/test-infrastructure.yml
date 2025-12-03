@@ -81,6 +81,9 @@ jobs:
         if: github.ref == 'refs/heads/prod'
         run: |
           echo "Testing SSH connection to bastion host..."
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           
           # Add bastion to known_hosts
           ssh-keyscan -H ${{ env.BASTION_IP }} >> ~/.ssh/known_hosts 2>/dev/null
