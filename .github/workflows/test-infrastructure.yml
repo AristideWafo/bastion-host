@@ -57,10 +57,12 @@ jobs:
             -out=tfplan
 
       - name: Terraform Apply
+        if: github.ref == 'refs/heads/prod'
         working-directory: terraform
         run: terraform apply -auto-approve tfplan
 
       - name: Get Terraform Outputs
+        if: github.ref == 'refs/heads/prod'
         id: outputs
         working-directory: terraform
         run: |
@@ -70,11 +72,13 @@ jobs:
           echo "PRIVATE_ID=$(terraform output -raw private_instance_id)" >> $GITHUB_ENV
 
       - name: Wait for Instances to be Ready
+        if: github.ref == 'refs/heads/prod'
         run: |
           echo "Waiting for instances to be ready..."
           sleep 60
 
       - name: Test SSH to Bastion Host
+        if: github.ref == 'refs/heads/prod'
         run: |
           echo "Testing SSH connection to bastion host..."
           
@@ -89,6 +93,7 @@ jobs:
               "echo 'Successfully connected to bastion host' && hostname"
 
       - name: Test Connectivity from Bastion to Private Instance
+        if: github.ref == 'refs/heads/prod'
         run: |
           echo "Testing connectivity from bastion to private instance..."
           
@@ -110,6 +115,7 @@ jobs:
                    'echo Successfully connected to private instance && hostname'"
 
       - name: Test Ping from Bastion to Private Instance
+        if: github.ref == 'refs/heads/prod'
         run: |
           echo "Testing ICMP connectivity..."
           ssh -i .ssh/test-key \
@@ -118,6 +124,7 @@ jobs:
               "ping -c 3 ${{ env.PRIVATE_IP }}"
 
       - name: Verify Security Groups
+        if: github.ref == 'refs/heads/prod'
         run: |
           echo "Verifying security group configurations..."
           
@@ -134,7 +141,7 @@ jobs:
             --output json
 
       - name: Infrastructure Tests Summary
-        if: success()
+        if: success() && github.ref == 'refs/heads/prod'
         run: |
           echo "✅ All infrastructure tests passed!"
           echo "Bastion IP: ${{ env.BASTION_IP }}"
@@ -143,7 +150,7 @@ jobs:
           echo "Private Instance ID: ${{ env.PRIVATE_ID }}"
 
       - name: Terraform Destroy
-        if: always()
+        if: always() && github.ref == 'refs/heads/prod'
         working-directory: terraform
         run: |
           terraform destroy -auto-approve \
@@ -151,6 +158,6 @@ jobs:
             -var="project_name=bastion-ci-${{ github.run_number }}"
 
       - name: Cleanup SSH Keys
-        if: always()
+        if: always() && github.ref == 'refs/heads/prod'
         run: |
           rm -rf .ssh/test-key*
