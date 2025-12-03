@@ -1,0 +1,156 @@
+name: Test Infrastructure
+
+on:
+  push:
+    branches: [prod, develop]
+  pull_request:
+    branches: [prod]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.6.0
+
+jobs:
+  terraform-test:
+    name: Provision, Test, and Destroy Infrastructure
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Generate SSH Key for Testing
+        run: |
+          mkdir -p .ssh
+          ssh-keygen -t rsa -b 4096 -f .ssh/test-key -N "" -C "github-actions@test"
+          chmod 600 .ssh/test-key
+          echo "SSH_PUBLIC_KEY=$(cat .ssh/test-key.pub)" >> $GITHUB_ENV
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var="ssh_public_key=${{ env.SSH_PUBLIC_KEY }}" \
+            -var="project_name=bastion-ci-${{ github.run_number }}" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get Terraform Outputs
+        id: outputs
+        working-directory: terraform
+        run: |
+          echo "BASTION_IP=$(terraform output -raw bastion_public_ip)" >> $GITHUB_ENV
+          echo "PRIVATE_IP=$(terraform output -raw private_instance_ip)" >> $GITHUB_ENV
+          echo "BASTION_ID=$(terraform output -raw bastion_instance_id)" >> $GITHUB_ENV
+          echo "PRIVATE_ID=$(terraform output -raw private_instance_id)" >> $GITHUB_ENV
+
+      - name: Wait for Instances to be Ready
+        run: |
+          echo "Waiting for instances to be ready..."
+          sleep 60
+
+      - name: Test SSH to Bastion Host
+        run: |
+          echo "Testing SSH connection to bastion host..."
+          
+          # Add bastion to known_hosts
+          ssh-keyscan -H ${{ env.BASTION_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          
+          # Test SSH connection
+          ssh -i .ssh/test-key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ec2-user@${{ env.BASTION_IP }} \
+              "echo 'Successfully connected to bastion host' && hostname"
+
+      - name: Test Connectivity from Bastion to Private Instance
+        run: |
+          echo "Testing connectivity from bastion to private instance..."
+          
+          # Copy private key to bastion
+          scp -i .ssh/test-key \
+              -o StrictHostKeyChecking=no \
+              .ssh/test-key \
+              ec2-user@${{ env.BASTION_IP }}:/tmp/test-key
+          
+          # Test SSH through bastion to private instance
+          ssh -i .ssh/test-key \
+              -o StrictHostKeyChecking=no \
+              ec2-user@${{ env.BASTION_IP }} \
+              "chmod 600 /tmp/test-key && \
+               ssh -i /tmp/test-key \
+                   -o StrictHostKeyChecking=no \
+                   -o ConnectTimeout=30 \
+                   ec2-user@${{ env.PRIVATE_IP }} \
+                   'echo Successfully connected to private instance && hostname'"
+
+      - name: Test Ping from Bastion to Private Instance
+        run: |
+          echo "Testing ICMP connectivity..."
+          ssh -i .ssh/test-key \
+              -o StrictHostKeyChecking=no \
+              ec2-user@${{ env.BASTION_IP }} \
+              "ping -c 3 ${{ env.PRIVATE_IP }}"
+
+      - name: Verify Security Groups
+        run: |
+          echo "Verifying security group configurations..."
+          
+          # Check bastion security group
+          aws ec2 describe-security-groups \
+            --filters "Name=tag:Name,Values=bastion-ci-${{ github.run_number }}-bastion-sg" \
+            --query 'SecurityGroups[0].IpPermissions' \
+            --output json
+          
+          # Check private instance security group
+          aws ec2 describe-security-groups \
+            --filters "Name=tag:Name,Values=bastion-ci-${{ github.run_number }}-private-instance-sg" \
+            --query 'SecurityGroups[0].IpPermissions' \
+            --output json
+
+      - name: Infrastructure Tests Summary
+        if: success()
+        run: |
+          echo "✅ All infrastructure tests passed!"
+          echo "Bastion IP: ${{ env.BASTION_IP }}"
+          echo "Private Instance IP: ${{ env.PRIVATE_IP }}"
+          echo "Bastion Instance ID: ${{ env.BASTION_ID }}"
+          echo "Private Instance ID: ${{ env.PRIVATE_ID }}"
+
+      - name: Terraform Destroy
+        if: always()
+        working-directory: terraform
+        run: |
+          terraform destroy -auto-approve \
+            -var="ssh_public_key=${{ env.SSH_PUBLIC_KEY }}" \
+            -var="project_name=bastion-ci-${{ github.run_number }}"
+
+      - name: Cleanup SSH Keys
+        if: always()
+        run: |
+          rm -rf .ssh/test-key*
