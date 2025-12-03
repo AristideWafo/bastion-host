@@ -2,7 +2,7 @@ name: Test Infrastructure
 
 on:
   push:
-    branches: [prod, develop]
+    branches: [prod, dev]
   pull_request:
     branches: [prod]
   workflow_dispatch:
